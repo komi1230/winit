@@ -464,23 +464,11 @@ extern "C" fn set_marked_text(
         let state_ptr: *mut c_void = *this.get_ivar("winitState");
         let state = &mut *(state_ptr as *mut ViewState);
 
-        let scancode = get_scancode(event) as u32;
-        let virtual_keycode = retrieve_keycode(event);
         let is_preediting: bool = *this.get_ivar("isPreediting");
         if !is_preediting {
             AppState::queue_event(EventWrapper::StaticEvent(Event::WindowEvent {
                 window_id: WindowId(get_window_id(state.ns_window)),
-                event: WindowEvent::KeyboardInput {
-                    device_id: DEVICE_ID,
-                    input: KeyboardInput {
-                        state: ElementState::Pressed,
-                        scancode: scancode as _,
-                        virtual_keycode,
-                        modifiers: event_mods(event),
-                    },
-                    is_synthetic: false,
-                },
-                // event: WindowEvent::IME(IME::Preedit("".to_owned(), None, None)),
+                event: WindowEvent::ReceivedCharacter('\0')
             }));
             this.set_ivar("isPreediting", true);
         }
