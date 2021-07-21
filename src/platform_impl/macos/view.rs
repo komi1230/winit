@@ -147,7 +147,7 @@ lazy_static! {
             sel!(setMarkedText:selectedRange:replacementRange:),
             set_marked_text as extern "C" fn(&mut Object, Sel, id, NSRange, NSRange),
         );
-        decl.add_method(sel!(unmarkText), unmark_text as extern "C" fn(&Object, Sel));
+        decl.add_method(sel!(unmarkText), unmark_text as extern "C" fn(&mut Object, Sel));
         decl.add_method(
             sel!(validAttributesForMarkedText),
             valid_attributes_for_marked_text as extern "C" fn(&Object, Sel) -> id,
@@ -159,7 +159,7 @@ lazy_static! {
         );
         decl.add_method(
             sel!(insertText:replacementRange:),
-            insert_text as extern "C" fn(&Object, Sel, id, NSRange),
+            insert_text as extern "C" fn(&mut Object, Sel, id, NSRange),
         );
         decl.add_method(
             sel!(characterIndexForPoint:),
@@ -174,7 +174,7 @@ lazy_static! {
             sel!(doCommandBySelector:),
             do_command_by_selector as extern "C" fn(&Object, Sel, Sel),
         );
-        decl.add_method(sel!(keyDown:), key_down as extern "C" fn(&Object, Sel, id));
+        decl.add_method(sel!(keyDown:), key_down as extern "C" fn(&mut Object, Sel, id));
         decl.add_method(sel!(keyUp:), key_up as extern "C" fn(&Object, Sel, id));
         decl.add_method(
             sel!(flagsChanged:),
@@ -257,8 +257,13 @@ lazy_static! {
             sel!(acceptsFirstMouse:),
             accepts_first_mouse as extern "C" fn(&Object, Sel, id) -> BOOL,
         );
+        decl.add_method(
+            sel!(clearMarkedText),
+            clear_marked_text as extern "C" fn(&mut Object, Sel),
+        );
         decl.add_ivar::<*mut c_void>("winitState");
         decl.add_ivar::<id>("markedText");
+        decl.add_ivar::<id>("previousMarkedText");
         let protocol = Protocol::get("NSTextInputClient").unwrap();
         decl.add_protocol(&protocol);
         ViewClass(decl.register())
@@ -269,7 +274,9 @@ extern "C" fn dealloc(this: &Object, _sel: Sel) {
     unsafe {
         let state: *mut c_void = *this.get_ivar("winitState");
         let marked_text: id = *this.get_ivar("markedText");
+        let previous_marked_text: id = *this.get_ivar("previousMarkedText");
         let _: () = msg_send![marked_text, release];
+        let _: () = msg_send![previous_marked_text, release];
         Box::from_raw(state as *mut ViewState);
     }
 }
@@ -282,6 +289,7 @@ extern "C" fn init_with_winit(this: &Object, _sel: Sel, state: *mut c_void) -> i
             let marked_text =
                 <id as NSMutableAttributedString>::init(NSMutableAttributedString::alloc(nil));
             (*this).set_ivar("markedText", marked_text);
+            (*this).set_ivar("previousMarkedText", marked_text);
             let _: () = msg_send![this, setPostsFrameChangedNotifications: YES];
 
             let notification_center: &Object =
@@ -418,11 +426,21 @@ extern "C" fn set_marked_text(
     this: &mut Object,
     _sel: Sel,
     string: id,
-    _selected_range: NSRange,
+    selected_range: NSRange,
     _replacement_range: NSRange,
 ) {
     trace!("Triggered `setMarkedText`");
     unsafe {
+        // Record previous marked text
+        let previous_marked_text_ref: &mut id = this.get_mut_ivar("previousMarkedText");
+        let composed_string = previous_marked_text_ref.clone().string();
+        let previous_slice = slice::from_raw_parts(
+            composed_string.UTF8String() as *const c_uchar,
+            composed_string.len(),
+        );
+        let previous_marked_text = str::from_utf8_unchecked(previous_slice);
+
+        // Set new marked text
         let marked_text_ref: &mut id = this.get_mut_ivar("markedText");
         let _: () = msg_send![(*marked_text_ref), release];
         let marked_text = NSMutableAttributedString::alloc(nil);
@@ -433,20 +451,57 @@ extern "C" fn set_marked_text(
             marked_text.initWithString(string);
         };
         *marked_text_ref = marked_text;
+
+        let current_marked_text = marked_text_ref.clone().string();
+
+        let current_slice = slice::from_raw_parts(
+            current_marked_text.UTF8String() as *const c_uchar,
+            current_marked_text.len(),
+        );
+        let current_marked_text = str::from_utf8_unchecked(current_slice);
+
+        let state_ptr: *mut c_void = *this.get_ivar("winitState");
+        let state = &mut *(state_ptr as *mut ViewState);
+
+        // Update composing text
+        println!("Previous : {:?} : {:?}", previous_marked_text.len(), previous_marked_text);
+        println!("Current : {:?} : {:?}", current_marked_text.len(), current_marked_text);
+        let select_position = selected_range.location as usize;
+
+        // Delete extra string
+        let count = current_marked_text.len() as i32 - previous_marked_text.len() as i32;
+        delete_marked_text(state, count);
+
+        for character in current_marked_text.chars() {
+            AppState::queue_event(EventWrapper::StaticEvent(Event::WindowEvent {
+                window_id: WindowId(get_window_id(state.ns_window)),
+                event: WindowEvent::ReceivedCharacter(character),
+            }));
+        }
+        (*this).set_ivar("previousMarkedText", marked_text);
     }
     trace!("Completed `setMarkedText`");
 }
 
-extern "C" fn unmark_text(this: &Object, _sel: Sel) {
+extern "C" fn unmark_text(this: &mut Object, _sel: Sel) {
     trace!("Triggered `unmarkText`");
     unsafe {
-        let marked_text: id = *this.get_ivar("markedText");
-        let mutable_string = marked_text.mutableString();
-        let _: () = msg_send![mutable_string, setString:""];
+        let _: () = msg_send![this, clearMarkedText];
         let input_context: id = msg_send![this, inputContext];
         let _: () = msg_send![input_context, discardMarkedText];
     }
     trace!("Completed `unmarkText`");
+}
+
+extern "C" fn clear_marked_text(this: &mut Object, _sel: Sel) {
+    unsafe {
+        let marked_text_ref: &mut id = this.get_mut_ivar("markedText");
+        // let previous_marked_text_ref: &mut id = this.get_mut_ivar("previousMarkedText");
+        let _: () = msg_send![(*marked_text_ref), release];
+        // let _: () = msg_send![(*previous_marked_text_ref), release];
+        *marked_text_ref = NSMutableAttributedString::alloc(nil);
+        // *previous_marked_text_ref = NSMutableAttributedString::alloc(nil);
+    }
 }
 
 extern "C" fn valid_attributes_for_marked_text(_this: &Object, _sel: Sel) -> id {
@@ -496,9 +551,15 @@ extern "C" fn first_rect_for_character_range(
     }
 }
 
-extern "C" fn insert_text(this: &Object, _sel: Sel, string: id, _replacement_range: NSRange) {
+extern "C" fn insert_text(this: &mut Object, sel: Sel, string: id, _replacement_range: NSRange) {
     trace!("Triggered `insertText`");
     unsafe {
+        println!("Inserting...");
+        if has_marked_text(this, sel) == YES {
+            unmark_text(this, sel);
+            clear_marked_text(this, sel);
+            return;
+        }
         let state_ptr: *mut c_void = *this.get_ivar("winitState");
         let state = &mut *(state_ptr as *mut ViewState);
 
@@ -600,6 +661,29 @@ fn is_corporate_character(c: char) -> bool {
     }
 }
 
+fn is_arrow_key(virtual_keycode: VirtualKeyCode) -> bool {
+    match virtual_keycode {
+        VirtualKeyCode::Up
+        | VirtualKeyCode::Right
+        | VirtualKeyCode::Down
+        | VirtualKeyCode::Left => true,
+        _ => false,
+    }
+}
+
+fn delete_marked_text(state: &mut ViewState, count: i32) {
+    if count < 1 {
+        return;
+    }
+    for _ in 0..count {
+        AppState::queue_event(EventWrapper::StaticEvent(Event::WindowEvent {
+            window_id: WindowId(get_window_id(state.ns_window)),
+            event: WindowEvent::ReceivedCharacter('\u{7f}')  // fire DELETE
+        }));
+    }
+}
+
+
 // Retrieves a layout-independent keycode given an event.
 fn retrieve_keycode(event: id) -> Option<VirtualKeyCode> {
     #[inline]
@@ -637,7 +721,7 @@ fn update_potentially_stale_modifiers(state: &mut ViewState, event: id) {
     }
 }
 
-extern "C" fn key_down(this: &Object, _sel: Sel, event: id) {
+extern "C" fn key_down(this: &mut Object, sel: Sel, event: id) {
     trace!("Triggered `keyDown`");
     unsafe {
         let state_ptr: *mut c_void = *this.get_ivar("winitState");
@@ -665,7 +749,7 @@ extern "C" fn key_down(this: &Object, _sel: Sel, event: id) {
                     virtual_keycode,
                     modifiers: event_mods(event),
                 },
-                is_synthetic: false,
+                is_synthetic: has_marked_text(this, sel) == YES,
             },
         };
 
@@ -718,7 +802,7 @@ extern "C" fn key_up(this: &Object, _sel: Sel, event: id) {
                     virtual_keycode,
                     modifiers: event_mods(event),
                 },
-                is_synthetic: false,
+                is_synthetic: has_marked_text(this, _sel) == YES,
             },
         };
 
@@ -837,7 +921,7 @@ extern "C" fn cancel_operation(this: &Object, _sel: Sel, _sender: id) {
                     virtual_keycode,
                     modifiers: event_mods(event),
                 },
-                is_synthetic: false,
+                is_synthetic: has_marked_text(this, _sel) == YES,
             },
         };
 
