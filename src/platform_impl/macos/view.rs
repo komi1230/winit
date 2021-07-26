@@ -290,7 +290,7 @@ extern "C" fn init_with_winit(this: &Object, _sel: Sel, state: *mut c_void) -> i
                 <id as NSMutableAttributedString>::init(NSMutableAttributedString::alloc(nil));
             (*this).set_ivar("markedText", marked_text);
             (*this).set_ivar("isIMEActivated", false);
-            (*this).set_ivar("currentCursorPosition", 0);
+            (*this).set_ivar("currentCursorPosition", 1);
             (*this).set_ivar("previousCursorPosition", 0);
             let _: () = msg_send![this, setPostsFrameChangedNotifications: YES];
 
@@ -459,21 +459,29 @@ extern "C" fn set_marked_text(
         let cursor_position = selected_range.location as i32;
         (*this).set_ivar("currentCursorPosition", cursor_position);
 
-        // Delete previous marked text, so that we don't see duplicated texts.
-        let previous_cursor_position = *this.get_ivar::<i32>("previousCursorPosition");
-        delete_marked_text(state, previous_cursor_position);
+        if cursor_position != 0 {
+            // Delete previous marked text, so that we don't see duplicated texts.
+            let previous_cursor_position = *this.get_ivar::<i32>("previousCursorPosition");
+            delete_marked_text(state, previous_cursor_position);
 
-        println!("Current: {:?}  {:?}", composed_string, cursor_position);
-        println!("Previous: {:?}", previous_cursor_position);
+            println!("Current: {:?}", cursor_position);
+            println!("Previous: {:?}", previous_cursor_position);
 
-        for character in composed_string.chars() {
-            AppState::queue_event(EventWrapper::StaticEvent(Event::WindowEvent {
-                window_id: WindowId(get_window_id(state.ns_window)),
-                event: WindowEvent::ReceivedCharacter(character),
-            }));
+            for character in composed_string.chars() {
+                AppState::queue_event(EventWrapper::StaticEvent(Event::WindowEvent {
+                    window_id: WindowId(get_window_id(state.ns_window)),
+                    event: WindowEvent::ReceivedCharacter(character),
+                }));
+            }
+            (*this).set_ivar("previousCursorPosition", cursor_position);
+        } else {
+            for character in composed_string.chars() {
+                AppState::queue_event(EventWrapper::StaticEvent(Event::WindowEvent {
+                    window_id: WindowId(get_window_id(state.ns_window)),
+                    event: WindowEvent::ReceivedCharacter(character),
+                }));
+            }
         }
-
-        (*this).set_ivar("previousCursorPosition", cursor_position);
     }
     trace!("Completed `setMarkedText`");
 }
@@ -754,6 +762,18 @@ extern "C" fn key_down(this: &mut Object, _sel: Sel, event: id) {
             // Clear them here so that we can know whether they have changed afterwards.
             let _: () = msg_send![this, clearMarkedText];
 
+            // If `set_marked_text` or `insert_text` not invoked, meaning IME was deactivated.
+            // when use arrow key in IME window, input context won't invoke the methods above,
+            // so we need ignore them.
+            // let is_ime_activated: bool = *this.get_ivar("isIMEActivated");
+            // let is_arrow_or_space_key = virtual_keycode
+            //     .map(|keycode| is_arrow_or_space_key(keycode))
+            //     .unwrap_or(false);
+            // if is_ime_activated && is_arrow_or_space_key {
+            //     let _: () = msg_send![this, unmarkText];
+            //     return;
+            // }
+
             // Some keys (and only *some*, with no known reason) don't trigger `insertText`, while others do...
             // So, we don't give repeats the opportunity to trigger that, since otherwise our hack will cause some
             // keys to generate twice as many characters.
@@ -932,6 +952,17 @@ fn mouse_click(this: &Object, event: id, button: MouseButton, button_state: Elem
         };
 
         AppState::queue_event(EventWrapper::StaticEvent(window_event));
+    }
+}
+
+fn is_arrow_or_space_key(virtual_keycode: VirtualKeyCode) -> bool {
+    match virtual_keycode {
+        VirtualKeyCode::Up
+        | VirtualKeyCode::Right
+        | VirtualKeyCode::Down
+        | VirtualKeyCode::Left
+        | VirtualKeyCode::Space => true,
+        _ => false,
     }
 }
 
