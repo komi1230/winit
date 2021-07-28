@@ -12,6 +12,7 @@ on:
       - '**.rs'
       - '**.toml'
       - '.github/workflows/ci.yml'
+  workflow_dispatch:
 
 jobs:
   Check_Formatting:
