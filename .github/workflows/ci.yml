@@ -1,6 +1,9 @@
 name: CI
 
 on:
+  push:
+    branches:
+    - ci-test
   workflow_dispatch:
 
 jobs:
